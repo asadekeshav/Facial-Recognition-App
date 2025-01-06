@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Recognition</title>
+    <style>
+        #container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+        }
+
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background-color: #f4f4f9;
+        }
+
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            margin: 5px;
+            cursor: pointer;
+        }
+
+        #user-name {
+            margin-top: 20px;
+            font-size: 20px;
+            font-weight: bold;
+            color: green;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="container">
+        <video id="video-feed" width="720" height="560" autoplay></video>
+        <canvas id="canvas"></canvas>
+    </div>
+    <button id="start-btn">Start Recognition</button>
+    <div id="user-name"></div> <!-- Display user name when found -->
+
+    <script src="./face-api.min.js"></script>
+    <script>
+        console.log(faceapi);
+
+        const videoFeedEl = document.getElementById('video-feed');
+        const canvas = document.getElementById('canvas');
+        const startBtn = document.getElementById('start-btn');
+        const userNameDiv = document.getElementById('user-name');
+
+        let faceBuffer = []; // Buffer for stabilization
+        const BUFFER_THRESHOLD = 5; // Minimum consistent detections required
+        let lastDetectionTime = 0;
+        const DEBOUNCE_DELAY = 1000; // 1-second debounce delay
+
+        // Load the face-api models
+        const loadModels = async () => {
+            await Promise.all([
+                faceapi.nets.ssdMobilenetv1.loadFromUri('./models'),
+                faceapi.nets.faceLandmark68Net.loadFromUri('./models'),
+                faceapi.nets.faceRecognitionNet.loadFromUri('./models'),
+                faceapi.nets.ageGenderNet.loadFromUri('./models'),
+                faceapi.nets.faceExpressionNet.loadFromUri('./models'),
+            ]);
+        };
+
+        // Start video feed
+        const startVideoFeed = async () => {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            videoFeedEl.srcObject = stream;
+        };
+
+        // Load stored face descriptors from the PHP API
+        const loadStoredFaceDescriptors = async () => {
+            try {
+                const response = await fetch('fetch_faces.php'); // URL to the PHP API
+                const users = await response.json();
+                console.log('Fetched Users:', users);
+
+                const labeledDescriptors = [];
+                const uniqueUsers = {}; // To filter out duplicate users
+
+                users.forEach(user => {
+                    if (!uniqueUsers[user.username]) {
+                        uniqueUsers[user.username] = true;
+
+                        // Ensure the descriptor is a valid array and convert it to Float32Array
+                        if (Array.isArray(user.descriptor) && user.descriptor.length === 128) {
+                            const descriptorArray = new Float32Array(user.descriptor); // Convert descriptor to Float32Array
+                            labeledDescriptors.push(
+                                new faceapi.LabeledFaceDescriptors(user.username, [descriptorArray])
+                            );
+                        } else {
+                            console.error(`Invalid descriptor for user: ${user.username}`);
+                        }
+                    }
+                });
+
+                return labeledDescriptors;
+            } catch (error) {
+                console.error('Error fetching face descriptors:', error);
+                return [];
+            }
+        };
+
+        // Run face recognition
+        const runRecognition = async () => {
+            const faceDescriptors = await loadStoredFaceDescriptors();
+            console.log('Labeled Descriptors:', faceDescriptors);
+
+            // Check if faceDescriptors is an empty array
+            if (faceDescriptors.length === 0) {
+                console.error('No face descriptors found. Please check your database.');
+                return;
+            }
+
+            const faceMatcher = new faceapi.FaceMatcher(faceDescriptors, 0.6);
+
+            canvas.style.left = `${videoFeedEl.offsetLeft}px`;
+            canvas.style.top = `${videoFeedEl.offsetTop}px`;
+            canvas.width = videoFeedEl.width;
+            canvas.height = videoFeedEl.height;
+
+            setInterval(async () => {
+                const detections = await faceapi
+                    .detectAllFaces(videoFeedEl, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.8 }))
+                    .withFaceLandmarks()
+                    .withFaceDescriptors()
+                    .withAgeAndGender()
+                    .withFaceExpressions();
+
+                const resizedResults = faceapi.resizeResults(detections, {
+                    width: canvas.width,
+                    height: canvas.height,
+                });
+
+                const ctx = canvas.getContext('2d');
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                resizedResults.forEach(result => {
+                    const { detection, descriptor, landmarks, age, gender, genderProbability, expressions } = result;
+
+                    // Skip if landmarks are missing or incomplete
+                    if (!landmarks || landmarks.positions.length < 68) {
+                        userNameDiv.textContent = 'Face partially visible, waiting for more landmarks...';
+                        return;
+                    }
+
+                    // Skip if bounding box is too small
+                    if (detection.box.width < 100 || detection.box.height < 100) {
+                        userNameDiv.textContent = 'Face too small, waiting for full visibility...';
+                        return;
+                    }
+
+                    // Debounce mechanism
+                    if (Date.now() - lastDetectionTime < DEBOUNCE_DELAY) {
+                        return;
+                    }
+                    lastDetectionTime = Date.now();
+
+                    // Stabilize the face recognition process
+                    faceBuffer.push(result);
+                    if (faceBuffer.length < BUFFER_THRESHOLD) {
+                        return;
+                    }
+
+                    // After stabilization, process the face
+                    faceBuffer.length = 0;
+
+                    const bestMatch = faceMatcher.findBestMatch(descriptor);
+                    const label = bestMatch.label === 'unknown' ? 'Unknown' : bestMatch.label;
+
+                    const drawBox = new faceapi.draw.DrawBox(detection.box, { label, boxColor: bestMatch.label !== 'unknown' ? 'green' : 'red' });
+                    drawBox.draw(canvas);
+
+                    const textField = new faceapi.draw.DrawTextField(
+                        [`Age: ${Math.round(age)}`, `${gender} (${Math.round(genderProbability * 100)}%)`, ...Object.entries(expressions).sort((a, b) => b[1] - a[1]).slice(0, 1).map(([key, val]) => `${key}: ${Math.round(val * 100)}%`)],
+                        detection.box.bottomRight
+                    );
+                    textField.draw(canvas);
+
+                    if (bestMatch.label !== 'unknown') {
+                        userNameDiv.textContent = `User found: ${bestMatch.label}`;
+                    } else {
+                        userNameDiv.textContent = 'No match found';
+                    }
+                });
+            }, 200);
+        };
+
+        startBtn.addEventListener('click', async () => {
+            await runRecognition();
+            startBtn.disabled = true;
+        });
+
+        (async () => {
+            await loadModels();
+            await startVideoFeed();
+        })();
+    </script>
+</body>
+
+</html>

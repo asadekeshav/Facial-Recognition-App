@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Improved Face Recognition</title>
+    <style>
+        #container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+        }
+
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background-color: #f4f4f9;
+        }
+
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            margin: 5px;
+            cursor: pointer;
+        }
+
+        #username-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        #username-container input {
+            padding: 8px;
+            font-size: 16px;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="username-container">
+        <input type="text" id="username" placeholder="Enter your name" />
+        <button id="start-btn">Start Recognition</button>
+    </div>
+    <div id="container">
+        <video id="video-feed" width="720" height="560" autoplay></video>
+        <canvas id="canvas"></canvas>
+    </div>
+    <button id="save-face-btn" style="display: none;">Save Face</button>
+    <button id="next-face-btn" style="display: none;">Next Face</button>
+
+    <script src="./face-api.min.js"></script>
+    <script>
+        const videoFeedEl = document.getElementById('video-feed');
+        const canvas = document.getElementById('canvas');
+        const startBtn = document.getElementById('start-btn');
+        const saveFaceBtn = document.getElementById('save-face-btn');
+        const nextFaceBtn = document.getElementById('next-face-btn');
+        const usernameInput = document.getElementById('username');
+        let faceDescriptor = null;
+
+        const loadModels = async () => {
+            await Promise.all([
+                faceapi.nets.ssdMobilenetv1.loadFromUri('./models'),
+                faceapi.nets.faceLandmark68Net.loadFromUri('./models'),
+                faceapi.nets.faceRecognitionNet.loadFromUri('./models'),
+                faceapi.nets.ageGenderNet.loadFromUri('./models'),
+                faceapi.nets.faceExpressionNet.loadFromUri('./models'),
+            ]);
+        };
+
+        const startVideoFeed = async () => {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            videoFeedEl.srcObject = stream;
+        };
+
+        const preprocessFrame = (frame) => {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = frame.videoWidth;
+            canvas.height = frame.videoHeight;
+            ctx.drawImage(frame, 0, 0);
+
+            // Apply brightness and contrast adjustments (example preprocessing)
+            ctx.filter = 'brightness(1.2) contrast(1.1)';
+            ctx.drawImage(frame, 0, 0);
+
+            return canvas;
+        };
+
+        const handleOcclusions = (results) => {
+            return results.filter(result => {
+                return result.detection.score > 0.8; // Filter out low-confidence detections
+            });
+        };
+
+        const trackFaces = () => {
+            // Implement basic tracking using Kalman filter or similar (placeholder for now)
+        };
+
+        const livenessCheck = (landmarks) => {
+            // Example: Check for blinking using eye landmarks (liveness detection placeholder)
+            const leftEye = landmarks.getLeftEye();
+            const rightEye = landmarks.getRightEye();
+            // Implement basic checks for eye movement or blinking patterns
+            return true; // Placeholder for liveness detection logic
+        };
+
+        const runRecognition = async () => {
+            canvas.style.left = `${videoFeedEl.offsetLeft}px`;
+            canvas.style.top = `${videoFeedEl.offsetTop}px`;
+            canvas.width = videoFeedEl.width;
+            canvas.height = videoFeedEl.height;
+
+            setInterval(async () => {
+                const preprocessedFrame = preprocessFrame(videoFeedEl);
+
+                const faceData = await faceapi
+                    .detectAllFaces(preprocessedFrame, new faceapi.SsdMobilenetv1Options())
+                    .withFaceLandmarks()
+                    .withFaceDescriptors()
+                    .withAgeAndGender()
+                    .withFaceExpressions();
+
+                const validFaces = handleOcclusions(faceData);
+
+                const resizedResults = faceapi.resizeResults(validFaces, {
+                    width: canvas.width,
+                    height: canvas.height,
+                });
+
+                const ctx = canvas.getContext('2d');
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                resizedResults.forEach((result) => {
+                    const { detection, age, gender, genderProbability, expressions, descriptor } = result;
+
+                    if (livenessCheck(result.landmarks)) {
+                        const drawBox = new faceapi.draw.DrawBox(detection.box, { label: 'Detected Face' });
+                        drawBox.draw(canvas);
+
+                        faceapi.draw.drawFaceLandmarks(canvas, [result]);
+
+                        const ageText = `Age: ${Math.round(age)}`;
+                        const genderText = `${gender} (${Math.round(genderProbability * 100)}%)`;
+                        const expressionText = Object.entries(expressions)
+                            .sort((a, b) => b[1] - a[1])
+                            .map(([key, val]) => `${key}: ${Math.round(val * 100)}%`)
+                            .slice(0, 1)
+                            .join(', ');
+
+                        const textField = new faceapi.draw.DrawTextField([
+                            ageText,
+                            genderText,
+                            expressionText
+                        ], detection.box.bottomRight);
+                        textField.draw(canvas);
+
+                        faceDescriptor = descriptor;
+                    }
+                });
+            }, 200);
+        };
+
+        // saveFaceBtn.addEventListener('click', () => {
+        //     if (!usernameInput.value) {
+        //         alert('Please enter your name.');
+        //         return;
+        //     }
+
+        //     if (faceDescriptor) {
+        //         let userFaceData = JSON.parse(localStorage.getItem(usernameInput.value)) || [];
+
+        //         const isDuplicate = userFaceData.some((storedData) => 
+        //             faceapi.euclideanDistance(storedData.descriptor, faceDescriptor) < 0.6
+        //         );
+
+        //         if (isDuplicate) {
+        //             alert('This face is already stored.');
+        //             return;
+        //         }
+
+        //         userFaceData.push({ 
+        //             descriptor: Array.from(faceDescriptor),
+        //             username: usernameInput.value
+        //         });
+
+        //         localStorage.setItem(usernameInput.value, JSON.stringify(userFaceData));
+        //         alert(`Face stored for ${usernameInput.value}`);
+
+        //         nextFaceBtn.style.display = 'block';
+        //     } else {
+        //         alert('No face detected to save.');
+        //     }
+        // });
+        
+        saveFaceBtn.addEventListener('click', () => {
+    if (!usernameInput.value) {
+        alert('Please enter your name.');
+        return;
+    }
+
+    if (faceDescriptor) {
+        // Send the face data to PHP script
+        fetch('save_face.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                username: usernameInput.value,
+                descriptor: Array.from(faceDescriptor)
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                alert(`Face stored for ${usernameInput.value}`);
+                nextFaceBtn.style.display = 'block';
+            } else {
+                alert('face saved already.');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('An error occurred while saving face data.');
+        });
+    } else {
+        alert('No face detected to save.');
+    }
+});
+
+
+        nextFaceBtn.addEventListener('click', () => {
+            location.reload();
+        });
+
+        startBtn.addEventListener('click', async () => {
+            if (!usernameInput.value) {
+                alert('Please enter your name.');
+                return;
+            }
+            await runRecognition();
+            startBtn.disabled = true;
+            saveFaceBtn.style.display = 'block';
+        });
+
+        (async () => {
+            await loadModels();
+            await startVideoFeed();
+        })();
+    </script>
+</body>
+
+</html>
