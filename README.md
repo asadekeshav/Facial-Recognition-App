@@ -31,7 +31,7 @@ This project is a **Facial Recognition App** built using **JavaScript**, **PHP**
 ## Getting Started
 1. Clone the repository:
    ```bash
-   git clone https://github.com/your-username/facial-recognition-app.git
+   git clone https://github.com/asadekeshav/facial-recognition-app.git
    ```
 2. Navigate to the project folder:
    ```bash
